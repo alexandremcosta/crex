@@ -1,11 +1,11 @@
 # Crex
 
-Use cron-like syntax to run periodic jobs in elixir GenServers.
+Use cron-like syntax to run jobs in Elixir.
 
-- Minimal config
+- Easy config
 - Tiny and readable
 - Cluster support
-- Telemetry and phx_dashboard integration
+- Telemetry and phx_dashboard
 
 ## Installation
 
@@ -73,54 +73,60 @@ defmodule MyApp.CrexSupervisor
     Supervisor.init(children, strategy: :one_for_one)
   end
 end
+```
 
-
+```elixir
 defmodule MyApp.Application do
   use Application
 
   def start(_type, _args) do
     children = [
       MyApp.CrexSupervisor
-    ]
-
-    opts = [strategy: :one_for_one, name: MyApp.Supervisor]
-    Supervisor.start_link(children, opts)
-  end
-end
+     ...
 ```
 
 ## Erlang cluster
-If you deploy above configuration to a cluster of machines, it will run the job on all machines,
-since Crex process is started on every machine.
+Crex runs each job once per cluster. Even though all nodes start all Crex processes,
+each job is allocated to one machine. For example, it allocates 3 jobs to 2 nodes like:
 
-To solve this problem, make sure the nodes are connected (`Node.list()` return all machines)
-and use the `:single` option
-```elixir
-  {Crex, ["* * * * * *", {MyApp.Scheduler, :run_in_all_nodes, []}]},
-  {Crex, ["* * * * * *", {MyApp.Scheduler, :run_in_single_node, []}, :single]},
-```
-
-Crex will map each job to each machine. For instance, 3 jobs to 2 machines will be allocated like:
 ```elixir
 %{node_1: job_1, node_2: job_2, node_1: job_3}
 ```
 
-## Caution
-1. On net splits, each partition allocates all the jobs. Thus the jobs will run once per partition.
-If the job is dangerous to run multiple times even in unusual netsplits, you need global state
-outside Erlang, like Redis or DB. Something like:
+Make sure `Node.list()` returns all nodes in the cluster for this to work.
+
+But if you need to run the function on all nodes, use the `:all` option:
 
 ```elixir
-def with_lock(global_key, fun) do
-  # Has to be atomic to prevent race condition
-  if is_nil_set(global_key, true) do
-    try do
-      fun.()
-    after
-      set(global_key, nil)
+  {Crex, ["* * * * * *", {MyApp.Scheduler, :run_in_all_nodes, []}, :all]},
+  {Crex, ["* * * * * *", {MyApp.Scheduler, :run_in_single_node, []}]},
+```
+
+
+## Caution
+1. On net splits, each partition allocates all the jobs. Thus, the jobs will run once per partition.
+If the job cannot run multiple times even in unusual netsplits, you need global state outside Erlang,
+like Redis or DB. Something like:
+
+```elixir
+defmodule MyApp.Helpers do
+  def with_lock(global_key, job_fun) do
+    # Has to be atomic to prevent race condition
+    if set_unexistent(global_key, true) do
+      try do
+        job_fun.()
+      after
+        unset(global_key)
+      end
     end
   end
 end
+```
+
+And then in `application.ex`
+
+```elixir
+  {Crex, ["* * * * * *", {MyApp.Helpers, :with_lock, ["foo:bar", fn -> Foo.bar() end]}]},
 ```
 
 2. Cron expressions have second precision and are evaluated over UTC:
